@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -354,6 +355,7 @@ class PatchDownloader {
       }
 
       if (segmented) {
+        final onDiskAtStart = offset;
         final result = await _downloadSegmented(
           url: url,
           destPath: destPath,
@@ -374,8 +376,9 @@ class PatchDownloader {
         }
         storedValidator = result.validator;
         offset = file.existsSync() ? file.lengthSync() : 0;
-        // טווחים שנמחקו אינם עוד על הדיסק; בתים שירדו בריצה זו אינם בסיס.
-        if (offset < baseline) setBaseline(offset);
+        // רק תחילית היעד מתחילת הפעולה שרדה; טווחים שנמחקו ובתים חדשים אינם בסיס.
+        final surviving = math.min(onDiskAtStart, math.min(offset, baseline));
+        if (surviving != baseline) setBaseline(surviving);
       }
 
       // אחרי קטיעה ה-hash מחושב פעם אחת על הקובץ המוגמר, לא על כל partial.
