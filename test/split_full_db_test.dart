@@ -282,6 +282,27 @@ void main() {
       expectOnlyPersistentPartLocks();
     });
 
+    test('צירוף מדווח onAssembleProgress עד הסוף', () async {
+      final assembled = <(int, int)>[];
+      await server([]).downloadSplitToFile(
+        split: _split(),
+        destPath: dest,
+        resumeToken: 'v31',
+        onAssembleProgress: (d, t) => assembled.add((d, t)),
+      );
+      expect(assembled.last, (50, 50));
+    });
+
+    test('.joining ישן וארוך מהארכיון אינו משאיר זנב בקובץ המחובר', () async {
+      File('$dest.joining').writeAsBytesSync(List.filled(200, 7));
+      await server([]).downloadSplitToFile(
+        split: _split(),
+        destPath: dest,
+        resumeToken: 'v31',
+      );
+      expect(File(dest).readAsBytesSync(), _full);
+    });
+
     test('המשך אחרי חלק שנקטע: Range לחלק השני בלבד, הראשון לא יורד שוב',
         () async {
       File(PatchDownloader.splitPartPath(dest, 0)).writeAsBytesSync(_parts[0]);

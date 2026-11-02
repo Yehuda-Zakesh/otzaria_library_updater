@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
+import 'package:seforim_library_updater/src/services/download_scheduler.dart';
 import 'package:seforim_library_updater/src/services/patch_downloader.dart';
 import 'package:test/test.dart';
 
@@ -25,6 +26,9 @@ class _AssetServer {
 
   /// משנה את הגוף לפני השליחה (תוכן פגום).
   Uint8List Function(int start, Uint8List body)? mutate;
+
+  /// בקשות טווח שמתחילות כאן מקבלות 200 מלא (אחרי השהיה קצרה).
+  bool Function(int start)? fullBodyFor;
 
   final List<_Request> requests = [];
   int active = 0;
@@ -80,10 +84,14 @@ class _AssetServer {
     var end = data.length - 1;
     final match =
         range == null ? null : RegExp(r'bytes=(\d+)-(\d*)').firstMatch(range);
-    final partial =
+    var partial =
         match != null && honorRange && (ifRange == null || ifRange == etag);
+    if (partial && fullBodyFor?.call(int.parse(match.group(1)!)) == true) {
+      partial = false;
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
     if (partial) {
-      start = int.parse(match.group(1)!);
+      start = int.parse(match!.group(1)!);
       if (match.group(2)!.isNotEmpty) {
         end = int.parse(match.group(2)!).clamp(0, data.length - 1);
       }
@@ -189,9 +197,11 @@ void main() {
     String? sha,
     String? token = 'asset-1',
     void Function(int, int?)? onProgress,
+    void Function(int)? onExistingBytes,
     bool Function()? isCancelled,
   }) =>
       d.downloadToFile(
+        onExistingBytes: onExistingBytes,
         url: server.url,
         destPath: dest,
         expectedSize: server.data.length,
@@ -291,6 +301,54 @@ void main() {
       {for (var i = 0; i < 4; i++) i * quarter + quarter ~/ 2},
     );
     expect(client.received, size);
+  });
+
+  test('הצירוף מדווח onAssembleProgress לאורך העבודה, והאימות על הקובץ כולו',
+      () async {
+    server.data = _data(16 << 20);
+    final assembled = <(int, int)>[];
+    final verified = <(int, int)>[];
+    await downloader().downloadToFile(
+      url: server.url,
+      destPath: dest,
+      expectedSize: server.data.length,
+      expectedSha256: _sha(server.data),
+      resumeToken: 'asset-1',
+      onAssembleProgress: (d, t) => assembled.add((d, t)),
+      onVerifyProgress: (d, t) => verified.add((d, t)),
+    );
+
+    final toCopy = server.data.length - server.data.length ~/ 4;
+    expect(assembled.length, greaterThan(2));
+    expect(assembled.every((e) => e.$2 == toCopy), isTrue);
+    expect(assembled.last, (toCopy, toCopy));
+    for (var i = 1; i < assembled.length; i++) {
+      expect(assembled[i].$1, greaterThanOrEqualTo(assembled[i - 1].$1));
+    }
+    expect(verified.last.$1, server.data.length);
+    expect(File(dest).readAsBytesSync(), server.data);
+  });
+
+  test('נפילה לחיבור יחיד אחרי שטווח 0 כבר כתב: המד אינו יורד', () async {
+    server.fullBodyFor = (start) => start >= size ~/ 2;
+    final emits = <(int, int?)>[];
+    final aggregator = ByteProgressAggregator(
+        totalBytes: size, onProgress: (d, t) => emits.add((d, t)));
+    final slot = aggregator.slot();
+    await download(
+      downloader(),
+      sha: _sha(server.data),
+      onProgress: slot.report,
+      onExistingBytes: slot.markExisting,
+    );
+
+    expect(File(dest).readAsBytesSync(), server.data);
+    expect(server.requests.any((r) => r.status == 200), isTrue);
+    for (var i = 0; i < emits.length; i++) {
+      expect(emits[i].$2, size, reason: '$emits');
+      if (i > 0) expect(emits[i].$1, greaterThanOrEqualTo(emits[i - 1].$1));
+    }
+    expect(emits.last, (size, size));
   });
 
   test('ניסיון שהביא בתים מאפס את המונה; רק רצף בלי בתים מפיל', () async {

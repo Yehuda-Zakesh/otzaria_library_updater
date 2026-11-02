@@ -174,6 +174,7 @@ extension _SegmentedDownload on PatchDownloader {
     String? validator,
     void Function(int downloaded, int? total)? onProgress,
     void Function(int verified, int total)? onVerifyProgress,
+    void Function(int done, int total)? onAssembleProgress,
     void Function(int bytes)? onExistingBytes,
     bool Function()? isCancelled,
   }) async {
@@ -243,6 +244,7 @@ extension _SegmentedDownload on PatchDownloader {
         hash: sha256 != null,
         isCancelled: isCancelled,
         onProgress: onVerifyProgress,
+        onAssemble: onAssembleProgress,
       );
       if (sha256 == null || digest == sha256) {
         _deleteSegmentLeftovers(destPath);
@@ -515,11 +517,13 @@ Future<String?> _assembleSegmentsInIsolate({
   required bool hash,
   bool Function()? isCancelled,
   void Function(int done, int total)? onProgress,
+  void Function(int done, int total)? onAssemble,
 }) =>
     _runCancellableWorker(
       _assembleWork(destPath, bounds, assembled, statePath, state, hash),
       isCancelled,
       onProgress,
+      onAssemble,
     );
 
 /// המלל הפעיל עובר ל-isolate, אחרת הודעת כשל הייתה חוזרת בעברית.
@@ -532,11 +536,11 @@ _WorkerBody<String?> _assembleWork(
   bool hash,
 ) {
   final messages = LibraryUpdaterMessages.current;
-  return (isCancelled, onProgress) async {
+  return (isCancelled, onProgress, onAssemble) async {
     LibraryUpdaterMessages.current = messages;
     try {
       return await _assembleSegments(destPath, bounds, assembled, statePath,
-          state, hash, isCancelled, onProgress);
+          state, hash, isCancelled, onProgress, onAssemble);
     } on FileSystemException catch (error) {
       throw PatchDownloadException(
           LibraryUpdaterMessages.current.saveDownloadedFileFailed('$error'));
@@ -556,15 +560,21 @@ Future<String?> _assembleSegments(
   bool hash,
   bool Function()? isCancelled,
   void Function(int done, int total)? onProgress,
+  void Function(int done, int total)? onAssemble,
 ) async {
   const chunkSize = 1 << 20;
   const reportEvery = 4 << 20;
+  const flushEvery = 16 << 20;
   final total = bounds.last;
+  final prefix = bounds[assembled];
   final digestSink = hash ? Sha256DigestCollector() : null;
   final hasher = digestSink == null ? null : FastSha256.start(digestSink);
   var done = 0;
   var lastReported = 0;
-  Future<void> advance(List<int> chunk) async {
+  var copied = 0;
+  var lastCopyReported = 0;
+  var lastFlushed = 0;
+  Future<void> advance(List<int> chunk, {bool copying = false}) async {
     await Future<void>.delayed(Duration.zero);
     if (isCancelled != null && isCancelled()) {
       throw const PatchDownloadCancelled();
@@ -575,10 +585,16 @@ Future<String?> _assembleSegments(
       lastReported = done;
       onProgress(done, total);
     }
+    if (copying) {
+      copied += chunk.length;
+      if (onAssemble != null && copied - lastCopyReported >= reportEvery) {
+        lastCopyReported = copied;
+        onAssemble(copied, total - prefix);
+      }
+    }
   }
 
   try {
-    final prefix = bounds[assembled];
     if (hasher != null) {
       final input = File(destPath).openSync();
       try {
@@ -606,10 +622,15 @@ Future<String?> _assembleSegments(
           for (var chunk = input.readSync(chunkSize);
               chunk.isNotEmpty;
               chunk = input.readSync(chunkSize)) {
-            await advance(chunk);
+            await advance(chunk, copying: true);
             // writeFromSync מחזיק את ה-buffer עד סוף הכתיבה, וה-GC של כל
             // ה-isolates (גם של ה-UI) ממתין לו בדיסק עמוס.
             await output.writeFrom(chunk);
+            // flush מחזורי: flush יחיד של טווח שלם משתיק את הדיווח דקות ב-USB.
+            if (copied - lastFlushed >= flushEvery) {
+              lastFlushed = copied;
+              output.flushSync();
+            }
           }
         } finally {
           input.closeSync();
@@ -624,6 +645,7 @@ Future<String?> _assembleSegments(
       output.closeSync();
     }
     onProgress?.call(done, total);
+    onAssemble?.call(copied, total - prefix);
     hasher?.close();
     return digestSink?.value.toString();
   } finally {
