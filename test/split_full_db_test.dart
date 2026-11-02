@@ -9,6 +9,7 @@ import 'package:http/testing.dart';
 import 'package:seforim_library_updater/src/messages/library_updater_messages.dart';
 import 'package:seforim_library_updater/src/models/library_release.dart';
 import 'package:seforim_library_updater/src/models/split_asset.dart';
+import 'package:seforim_library_updater/src/services/download_scheduler.dart';
 import 'package:seforim_library_updater/src/services/github_library_release_client.dart';
 import 'package:seforim_library_updater/src/services/library_update_discovery.dart';
 import 'package:seforim_library_updater/src/services/patch_downloader.dart';
@@ -328,6 +329,62 @@ void main() {
           captured.map((r) => r.url.path.split('part-').last), ['001', '002']);
       expect(captured.first.headers['Range'], 'bytes=8-');
       expect(File(dest).readAsBytesSync(), _full);
+    });
+
+    test('חלקים שכבר על הדיסק אינם בתי רשת במונה המאחד', () async {
+      File(PatchDownloader.splitPartPath(dest, 0)).writeAsBytesSync(_parts[0]);
+      File('${PatchDownloader.splitPartPath(dest, 0)}.resume')
+          .writeAsStringSync('v31|${_partName(0)}|${_sha(_parts[0])}\n"p0"');
+      final partial = PatchDownloader.splitPartPath(dest, 1);
+      File(partial).writeAsBytesSync(_parts[1].sublist(0, 8));
+      File('$partial.resume')
+          .writeAsStringSync('v31|${_partName(1)}|${_sha(_parts[1])}\n"p1"');
+
+      final emits = <(int, int?)>[];
+      final slot = ByteProgressAggregator(
+        totalBytes: 50,
+        onProgress: (d, t) => emits.add((d, t)),
+      ).slot();
+      await server([], bodies: {
+        1: (req) => http.StreamedResponse(
+              Stream.value(_parts[1].sublist(8)),
+              206,
+              contentLength: 12,
+              headers: {'content-range': 'bytes 8-19/20', 'etag': '"p1"'},
+            ),
+      }).downloadSplitToFile(
+        split: _split(),
+        destPath: dest,
+        resumeToken: 'v31',
+        onProgress: slot.report,
+        onExistingBytes: slot.markExisting,
+      );
+
+      expect(emits.last, (22, 22));
+      for (var i = 1; i < emits.length; i++) {
+        expect(emits[i].$1, greaterThanOrEqualTo(emits[i - 1].$1),
+            reason: '$emits');
+      }
+    });
+
+    test('ארכיון מחובר ומאומת שכבר על הדיסק אינו בתי רשת', () async {
+      await server([]).downloadSplitToFile(
+          split: _split(), destPath: dest, resumeToken: 'v31');
+      final emits = <(int, int?)>[];
+      final slot = ByteProgressAggregator(
+        totalBytes: 50,
+        onProgress: (d, t) => emits.add((d, t)),
+      ).slot();
+      final captured = <http.BaseRequest>[];
+      await server(captured).downloadSplitToFile(
+        split: _split(),
+        destPath: dest,
+        resumeToken: 'v31',
+        onProgress: slot.report,
+        onExistingBytes: slot.markExisting,
+      );
+      expect(captured, isEmpty);
+      expect(emits.last, (0, 0));
     });
 
     test('חלק פגום → נכשל, החלק נמחק והארכיון לא נכתב', () async {

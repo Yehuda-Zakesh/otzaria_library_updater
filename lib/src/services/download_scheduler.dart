@@ -109,7 +109,11 @@ class ByteProgressAggregator {
 
   void _markExisting(int index, int bytes) {
     final value = bytes < 0 ? 0 : bytes;
-    final received = _received[index] > value ? value : _received[index];
+    // רק ירידה (תחילית שנזרקה) חותכת; עלייה מגיעה גם מחלק מאוחר בהורדה מפוצלת
+    // שבתי החלקים הקודמים כבר נספרו ב-received.
+    final shrinks = value < _existing[index];
+    final received =
+        shrinks && _received[index] > value ? value : _received[index];
     if (_existing[index] == value && _received[index] == received) return;
     _existing[index] = value;
     _received[index] = received;

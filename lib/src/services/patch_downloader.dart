@@ -525,6 +525,7 @@ class PatchDownloader {
     void Function(int downloaded, int? total)? onProgress,
     void Function(int verified, int total)? onVerifyProgress,
     void Function(int done, int total)? onAssembleProgress,
+    void Function(int bytes)? onExistingBytes,
     bool Function()? isCancelled,
   }) {
     final split = asset.split;
@@ -536,6 +537,7 @@ class PatchDownloader {
         onProgress: onProgress,
         onVerifyProgress: onVerifyProgress,
         onAssembleProgress: onAssembleProgress,
+        onExistingBytes: onExistingBytes,
         isCancelled: isCancelled,
       );
     }
@@ -551,6 +553,7 @@ class PatchDownloader {
       onProgress: onProgress,
       onVerifyProgress: onVerifyProgress,
       onAssembleProgress: onAssembleProgress,
+      onExistingBytes: onExistingBytes,
       isCancelled: isCancelled,
     );
   }
@@ -559,7 +562,8 @@ class PatchDownloader {
   /// [destPath] ומאמת את השלם; [resumeToken] כובל גם את הארכיון המחובר.
   /// [onVerifyProgress] — אימות החלקים והארכיון (מתוך [SplitAsset.size]);
   /// [onAssembleProgress] — צירוף טווחי חלק גדול, ואחריו צירוף החלקים
-  /// לארכיון; כל שלב מתחיל מ-0.
+  /// לארכיון; כל שלב מתחיל מ-0. [onExistingBytes] — סכום הבסיסים של החלקים
+  /// שהגענו אליהם (חלק שירד בריצה קודמת אינו בתי רשת).
   Future<void> downloadSplitToFile({
     required SplitAsset split,
     required String destPath,
@@ -567,6 +571,7 @@ class PatchDownloader {
     void Function(int downloaded, int? total)? onProgress,
     void Function(int verified, int total)? onVerifyProgress,
     void Function(int done, int total)? onAssembleProgress,
+    void Function(int bytes)? onExistingBytes,
     bool Function()? isCancelled,
   }) async {
     _throwIfCancelled(isCancelled);
@@ -578,6 +583,7 @@ class PatchDownloader {
         _readSidecar(sidecarPath)?.token == joinedToken &&
         File(destPath).existsSync() &&
         File(destPath).lengthSync() == split.size) {
+      onExistingBytes?.call(split.size);
       onProgress?.call(split.size, split.size);
       if (await _hashFileSha256InIsolate(
               destPath, isCancelled, onVerifyProgress) ==
@@ -594,6 +600,7 @@ class PatchDownloader {
     _deleteSplitParts(destPath, from: split.parts.length);
 
     var completed = 0;
+    final baselines = List<int>.filled(split.parts.length, 0);
     for (var i = 0; i < split.parts.length; i++) {
       final part = split.parts[i];
       final base = completed;
@@ -611,6 +618,12 @@ class PatchDownloader {
             ? null
             : (verified, _) => onVerifyProgress(base + verified, split.size),
         onAssembleProgress: onAssembleProgress,
+        onExistingBytes: onExistingBytes == null
+            ? null
+            : (bytes) {
+                baselines[i] = bytes;
+                onExistingBytes(baselines.fold(0, (a, b) => a + b));
+              },
         isCancelled: isCancelled,
       );
       completed += part.size;
