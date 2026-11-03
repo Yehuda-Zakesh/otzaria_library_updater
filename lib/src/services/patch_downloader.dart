@@ -199,6 +199,9 @@ class PatchDownloader {
   /// [onAssembleProgress] — צירוף הטווחים אל היעד אחרי הורדה מפוצלת (בתים
   /// שהועתקו, מתוך מה שיש להעתיק); בדיווח כל ~4MB גם בזמן עבודה ממושכת.
   ///
+  /// [onProgress] שזורק מפיל את ההורדה (כך גם ביטול מכוון); קריאות אימות
+  /// וצירוף מה-worker נבלעות ונרשמות ל-stderr.
+  ///
   /// הורדה שנייה לאותו [destPath] בזמן שהראשונה רצה נכשלת מיד ב-
   /// [PatchDownloadException], בלי לגעת בקבצים (`<destPath>.lock`).
   /// קובץ הנעילה הריק נשאר גם אחרי ההורדה; אין למחוק או להחליף אותו בניקוי.
@@ -521,6 +524,8 @@ class PatchDownloader {
 
   /// מוריד את [asset] אל [destPath]: קובץ יחיד דרך [downloadToFile] (עם
   /// ה-digest כ-sha256 צפוי), ונכס מפוצל דרך [downloadSplitToFile].
+  /// [onProgress]/[onExistingBytes] הם סכומים ואינם מתאימים למשבצת אחת של
+  /// מונה מאחד; לשם כך [onPartProgress]/[onPartExisting] (קובץ יחיד = חלק 0).
   Future<void> downloadReleaseAssetToFile({
     required ReleaseAsset asset,
     required String destPath,
@@ -529,6 +534,8 @@ class PatchDownloader {
     void Function(int verified, int total)? onVerifyProgress,
     void Function(int done, int total)? onAssembleProgress,
     void Function(int bytes)? onExistingBytes,
+    void Function(int part, int downloaded, int? total)? onPartProgress,
+    void Function(int part, int bytes)? onPartExisting,
     bool Function()? isCancelled,
   }) {
     final split = asset.split;
@@ -541,6 +548,8 @@ class PatchDownloader {
         onVerifyProgress: onVerifyProgress,
         onAssembleProgress: onAssembleProgress,
         onExistingBytes: onExistingBytes,
+        onPartProgress: onPartProgress,
+        onPartExisting: onPartExisting,
         isCancelled: isCancelled,
       );
     }
@@ -553,10 +562,20 @@ class PatchDownloader {
           ? digest.substring('sha256:'.length)
           : null,
       resumeToken: resumeToken,
-      onProgress: onProgress,
+      onProgress: onProgress == null && onPartProgress == null
+          ? null
+          : (downloaded, total) {
+              onPartProgress?.call(0, downloaded, total);
+              onProgress?.call(downloaded, total);
+            },
       onVerifyProgress: onVerifyProgress,
       onAssembleProgress: onAssembleProgress,
-      onExistingBytes: onExistingBytes,
+      onExistingBytes: onExistingBytes == null && onPartExisting == null
+          ? null
+          : (bytes) {
+              onPartExisting?.call(0, bytes);
+              onExistingBytes?.call(bytes);
+            },
       isCancelled: isCancelled,
     );
   }
@@ -569,6 +588,7 @@ class PatchDownloader {
   /// שהגענו אליהם (חלק שירד בריצה קודמת אינו בתי רשת). מונה מאחד צריך את
   /// [onPartProgress]/[onPartExisting] עם משבצת לכל חלק: בסכום, ירידת בסיס
   /// של חלק מאוחר הייתה חותכת גם בתי רשת של חלקים קודמים.
+  /// נעילת `<destPath>.lock` כמו ב-[downloadToFile]; נעילות החלקים נפרדות.
   Future<void> downloadSplitToFile({
     required SplitAsset split,
     required String destPath,
@@ -582,6 +602,37 @@ class PatchDownloader {
     bool Function()? isCancelled,
   }) async {
     _throwIfCancelled(isCancelled);
+    final lock = _DestinationLock.acquire(destPath);
+    try {
+      await _downloadSplitToFileLocked(
+        split: split,
+        destPath: destPath,
+        resumeToken: resumeToken,
+        onProgress: onProgress,
+        onVerifyProgress: onVerifyProgress,
+        onAssembleProgress: onAssembleProgress,
+        onExistingBytes: onExistingBytes,
+        onPartProgress: onPartProgress,
+        onPartExisting: onPartExisting,
+        isCancelled: isCancelled,
+      );
+    } finally {
+      lock.release();
+    }
+  }
+
+  Future<void> _downloadSplitToFileLocked({
+    required SplitAsset split,
+    required String destPath,
+    String? resumeToken,
+    void Function(int downloaded, int? total)? onProgress,
+    void Function(int verified, int total)? onVerifyProgress,
+    void Function(int done, int total)? onAssembleProgress,
+    void Function(int bytes)? onExistingBytes,
+    void Function(int part, int downloaded, int? total)? onPartProgress,
+    void Function(int part, int bytes)? onPartExisting,
+    bool Function()? isCancelled,
+  }) async {
     final sidecarPath = resumeSidecarPath(destPath);
     final joinedToken =
         resumeToken == null ? null : '$resumeToken|joined:${split.sha256}';
@@ -1808,6 +1859,10 @@ class _DestinationLock {
       try {
         db?.close();
       } catch (_) {}
+      if (error is sqlite3.SqliteException &&
+          (error.resultCode == 5 || error.resultCode == 6)) {
+        throw PatchDownloadException(messages.destinationBusy(destPath));
+      }
       throw PatchDownloadException(
           messages.writeResumeSidecarFailed(path, '$error'));
     }

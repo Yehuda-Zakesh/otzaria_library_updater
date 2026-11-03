@@ -243,7 +243,10 @@ void main() {
     List<String> leftovers() => tmp
         .listSync()
         .map((e) => e.path.split(RegExp(r'[\\/]')).last)
-        .where((n) => n != 'seforim.db.zst' && n != 'seforim.db.zst.resume')
+        .where((n) =>
+            n != 'seforim.db.zst' &&
+            n != 'seforim.db.zst.resume' &&
+            n != 'seforim.db.zst.lock')
         .toList();
 
     void expectOnlyPersistentPartLocks() {

@@ -129,6 +129,7 @@ abstract class LibraryUpdaterMessages {
   String saveDownloadedFileFailed(String error);
   String tooManyRedirects(String url);
   String writeResumeSidecarFailed(String path, String error);
+  String destinationBusy(String path);
   String checksumMismatchDetailed(String label, String expected, String actual);
   String checksumMismatch(String label);
   String localFileNotFound(String path);
@@ -472,6 +473,9 @@ class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages {
       'שמירת הקובץ שהורד לדיסק נכשלה: $error';
   @override
   String tooManyRedirects(String url) => 'יותר מדי הפניות (redirects): $url';
+  @override
+  String destinationBusy(String path) =>
+      'הורדה אחרת כבר כותבת לאותו יעד ($path); נסו שוב כשתסתיים.';
   @override
   String writeResumeSidecarFailed(String path, String error) =>
       'כתיבת קובץ הזהות להמשך ההורדה נכשלה ($path): $error';
