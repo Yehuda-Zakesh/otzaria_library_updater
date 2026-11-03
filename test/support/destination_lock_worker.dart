@@ -18,7 +18,11 @@ Future<String> downloadForLockTest(String url, String dest) async {
     );
     return 'success';
   } catch (error) {
-    return error is PatchDownloadException ? 'locked' : '$error';
+    return error is PatchDownloadException &&
+            error.message ==
+                LibraryUpdaterMessages.current.destinationBusy(dest)
+        ? 'locked'
+        : '$error';
   } finally {
     downloader.dispose();
   }
