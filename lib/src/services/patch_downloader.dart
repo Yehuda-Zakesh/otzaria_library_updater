@@ -566,7 +566,9 @@ class PatchDownloader {
   /// [onVerifyProgress] — אימות החלקים והארכיון (מתוך [SplitAsset.size]);
   /// [onAssembleProgress] — צירוף טווחי חלק גדול, ואחריו צירוף החלקים
   /// לארכיון; כל שלב מתחיל מ-0. [onExistingBytes] — סכום הבסיסים של החלקים
-  /// שהגענו אליהם (חלק שירד בריצה קודמת אינו בתי רשת).
+  /// שהגענו אליהם (חלק שירד בריצה קודמת אינו בתי רשת). מונה מאחד צריך את
+  /// [onPartProgress]/[onPartExisting] עם משבצת לכל חלק: בסכום, ירידת בסיס
+  /// של חלק מאוחר הייתה חותכת גם בתי רשת של חלקים קודמים.
   Future<void> downloadSplitToFile({
     required SplitAsset split,
     required String destPath,
@@ -575,6 +577,8 @@ class PatchDownloader {
     void Function(int verified, int total)? onVerifyProgress,
     void Function(int done, int total)? onAssembleProgress,
     void Function(int bytes)? onExistingBytes,
+    void Function(int part, int downloaded, int? total)? onPartProgress,
+    void Function(int part, int bytes)? onPartExisting,
     bool Function()? isCancelled,
   }) async {
     _throwIfCancelled(isCancelled);
@@ -588,6 +592,11 @@ class PatchDownloader {
         File(destPath).lengthSync() == split.size) {
       onExistingBytes?.call(split.size);
       onProgress?.call(split.size, split.size);
+      for (var i = 0; i < split.parts.length; i++) {
+        final size = split.parts[i].size;
+        onPartExisting?.call(i, size);
+        onPartProgress?.call(i, size, size);
+      }
       if (await _hashFileSha256InIsolate(
               destPath, isCancelled, onVerifyProgress) ==
           split.sha256) {
@@ -615,17 +624,20 @@ class PatchDownloader {
         resumeToken: resumeToken == null
             ? null
             : '$resumeToken|${part.name}|${part.sha256}',
-        onProgress: (downloaded, _) =>
-            onProgress?.call(base + downloaded, split.size),
+        onProgress: (downloaded, total) {
+          onPartProgress?.call(i, downloaded, total);
+          onProgress?.call(base + downloaded, split.size);
+        },
         onVerifyProgress: onVerifyProgress == null
             ? null
             : (verified, _) => onVerifyProgress(base + verified, split.size),
         onAssembleProgress: onAssembleProgress,
-        onExistingBytes: onExistingBytes == null
+        onExistingBytes: onExistingBytes == null && onPartExisting == null
             ? null
             : (bytes) {
                 baselines[i] = bytes;
-                onExistingBytes(baselines.fold(0, (a, b) => a + b));
+                onPartExisting?.call(i, bytes);
+                onExistingBytes?.call(baselines.fold(0, (a, b) => a + b));
               },
         isCancelled: isCancelled,
       );
@@ -1598,7 +1610,12 @@ Future<T> _runCancellableWorker<T>(
       if (cancelled) workerCancel!.send(null);
     } else if (message is List) {
       final report = message.length > 2 ? onAssemble : onProgress;
-      report?.call(message[0] as int, message[1] as int);
+      // callback שזורק אינו מפיל הורדה שהסתיימה תקין; נרשם ל-stderr.
+      try {
+        report?.call(message[0] as int, message[1] as int);
+      } catch (error) {
+        stderr.writeln('progress callback failed: $error');
+      }
     }
   });
   final poll = isCancelled == null
@@ -1742,6 +1759,8 @@ Future<void> _joinParts(List<String> partPaths, String destPath,
         _deleteFileQuietly(partPath);
         _deleteFileQuietly(PatchDownloader.resumeSidecarPath(partPath));
       }
+      // writeOnly אינו מובטח לקצץ, ו-.joining ישן שלא נמחק השאיר זנב.
+      output.truncateSync(written);
       output.flushSync();
     } finally {
       output.closeSync();

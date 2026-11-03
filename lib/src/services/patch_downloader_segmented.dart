@@ -645,7 +645,8 @@ Future<String?> _assembleSegments(
       output.closeSync();
     }
     onProgress?.call(done, total);
-    onAssemble?.call(copied, total - prefix);
+    // אין מה לצרף (הכול כבר ביעד): (0,0) היה מדווח שלב ריק.
+    if (total > prefix) onAssemble?.call(copied, total - prefix);
     hasher?.close();
     return digestSink?.value.toString();
   } finally {
