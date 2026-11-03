@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -69,6 +70,7 @@ class LibraryMirrorExporter {
     int? Function(String path)? freeBytesFor,
     int maxConnections = PatchDownloader.defaultMaxConnections,
     int segmentThresholdBytes = PatchDownloader.defaultSegmentThresholdBytes,
+    this.connectionsForAsset,
   })  : _scheduler = scheduler ?? DownloadScheduler(),
         _freeBytesFor = freeBytesFor ?? DiskSpaceProbe.freeBytesFor,
         _client = client ?? GithubLibraryReleaseClient(),
@@ -96,6 +98,11 @@ class LibraryMirrorExporter {
     if (requested < 1) return 1;
     return requested < cap ? requested : cap;
   }
+
+  /// נקרא לפני כל הורדת נכס ומחליף את [connectionsPerFile] להורדה הזו בלבד
+  /// (קטן מ-1 → 1); null משאיר את ברירת המחדל. זורק → הייצוא נכשל.
+  final FutureOr<int> Function(String destPath, int size, String? sha256)?
+      connectionsForAsset;
 
   /// כמה חיבורים פותח קובץ גדול אחד בייצוא הזה.
   int get connectionsPerFile => _downloader.maxConnections;
@@ -529,7 +536,14 @@ class LibraryMirrorExporter {
           onStage?.call(
               strings.exportDownloading(job.release.tag, job.asset.name));
           final progress = slots[index];
+          final connections = await connectionsForAsset?.call(
+            job.dest,
+            job.asset.size,
+            job.sha256,
+          );
+          _throwIfCancelled(isCancelled);
           await _downloader.downloadToFile(
+            connections: connections,
             url: job.asset.downloadUrl,
             destPath: job.dest,
             // ה-manifests נכתבים ע"י GitHub ללא `size` אמין בכל המקרים; `size`

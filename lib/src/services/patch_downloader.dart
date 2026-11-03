@@ -215,6 +215,7 @@ class PatchDownloader {
     void Function(int verified, int total)? onVerifyProgress,
     void Function(int done, int total)? onAssembleProgress,
     void Function(int bytes)? onExistingBytes,
+    int? connections,
     bool Function()? isCancelled,
   }) async {
     // ביטול בכניסה קודם לכל שינוי בדיסק ולכל בקשת רשת.
@@ -231,6 +232,7 @@ class PatchDownloader {
         onVerifyProgress: onVerifyProgress,
         onAssembleProgress: onAssembleProgress,
         onExistingBytes: onExistingBytes,
+        connections: connections,
         isCancelled: isCancelled,
       );
     } finally {
@@ -248,9 +250,11 @@ class PatchDownloader {
     void Function(int verified, int total)? onVerifyProgress,
     void Function(int done, int total)? onAssembleProgress,
     void Function(int bytes)? onExistingBytes,
+    int? connections,
     bool Function()? isCancelled,
   }) async {
     final messages = LibraryUpdaterMessages.current;
+    final maxConn = _effectiveConnections(connections);
 
     if (!isRemoteUrl(url)) {
       await _copyLocalFile(
@@ -318,7 +322,7 @@ class PatchDownloader {
 
       var offset = file.existsSync() ? file.lengthSync() : 0;
       final alreadyComplete = expectedSize != null && offset >= expectedSize;
-      final segmented = _segmentationApplies(expectedSize);
+      final segmented = _segmentationApplies(expectedSize, maxConn);
       final resumedPlan = segmented && !alreadyComplete
           ? _readSegmentPlan(destPath, resumeToken, url, expectedSize!,
               expectedSha256?.toLowerCase())
@@ -371,6 +375,7 @@ class PatchDownloader {
           onVerifyProgress: onVerifyProgress,
           onAssembleProgress: onAssembleProgress,
           onExistingBytes: setBaseline,
+          connections: maxConn,
           isCancelled: isCancelled,
         );
         if (result.done) {

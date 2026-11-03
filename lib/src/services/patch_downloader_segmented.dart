@@ -56,8 +56,12 @@ void _deleteSegmentLeftovers(String destPath) {
 }
 
 extension _SegmentedDownload on PatchDownloader {
-  bool _segmentationApplies(int? expectedSize) =>
-      maxConnections > 1 &&
+  /// [override] מחליף את [maxConnections] להורדה אחת; מתחת ל-1 → 1.
+  int _effectiveConnections(int? override) =>
+      override == null ? maxConnections : (override < 1 ? 1 : override);
+
+  bool _segmentationApplies(int? expectedSize, int connections) =>
+      connections > 1 &&
       expectedSize != null &&
       expectedSize >= segmentThresholdBytes;
 
@@ -146,10 +150,11 @@ extension _SegmentedDownload on PatchDownloader {
       };
 
   /// [have] בתים כבר ב-dest; היתרה מתחלקת שווה. null כשהיתרה קטנה מהסף.
-  _SegmentPlan? _planSegments(int have, int size, String? validator) {
+  _SegmentPlan? _planSegments(
+      int have, int size, String? validator, int connections) {
     final remaining = size - have;
     if (remaining < segmentThresholdBytes || remaining < 2) return null;
-    final count = maxConnections < remaining ? maxConnections : remaining;
+    final count = connections < remaining ? connections : remaining;
     final per = remaining ~/ count;
     return _SegmentPlan(
       [0, for (var k = 1; k < count; k++) have + per * k, size],
@@ -176,6 +181,7 @@ extension _SegmentedDownload on PatchDownloader {
     void Function(int verified, int total)? onVerifyProgress,
     void Function(int done, int total)? onAssembleProgress,
     void Function(int bytes)? onExistingBytes,
+    required int connections,
     bool Function()? isCancelled,
   }) async {
     final file = File(destPath);
@@ -198,7 +204,10 @@ extension _SegmentedDownload on PatchDownloader {
     while (true) {
       final current = plan ??
           _planSegments(
-              file.existsSync() ? file.lengthSync() : 0, size, validator);
+              file.existsSync() ? file.lengthSync() : 0,
+              size,
+              validator,
+              connections);
       if (current == null) return (done: false, validator: validator);
       plan = current;
       // תחילית שירדה בלי ETag אינה כבולה ל-ETag שהבדיקה תביא עכשיו.

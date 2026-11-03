@@ -103,6 +103,7 @@ void main() {
     int? Function(String path)? freeBytesFor,
     int maxConnections = PatchDownloader.defaultMaxConnections,
     int segmentThresholdBytes = PatchDownloader.defaultSegmentThresholdBytes,
+    FutureOr<int> Function(String, int, String?)? connectionsForAsset,
   }) {
     Uint8List bodyFor(String name) {
       if (!name.endsWith('.manifest.json')) {
@@ -187,6 +188,7 @@ void main() {
         freeBytesFor: freeBytesFor,
         maxConnections: maxConnections,
         segmentThresholdBytes: segmentThresholdBytes,
+        connectionsForAsset: connectionsForAsset,
       ),
       fetched: fetched,
     );
@@ -2342,6 +2344,131 @@ void main() {
       expect(served, dbSize - cut);
       expect(File(dbPath).lengthSync(), dbSize);
       expect(mirroredAssetNames(destDir, 'v3'), ['seforim.db.zst']);
+    });
+  });
+
+  group('connectionsForAsset — חיבורים לפי נכס', () {
+    const size = 3 << 20;
+    final releases = [
+      release('v3', assets: [
+        'seforim.db.zst',
+        'patch-v2-v3.db.zst',
+        'patch-v2-v3.db.zst.manifest.json',
+      ]),
+    ];
+    const sizes = {'seforim.db.zst': size, 'patch-v2-v3.db.zst': size};
+
+    // שרת Range פשוט; מתעד את ה-Range של כל בקשת נכס לפי שם.
+    ({
+      http.StreamedResponse? Function(http.BaseRequest, Uint8List) respond,
+      Map<String, List<String?>> ranges,
+    }) rangeServer() {
+      final ranges = <String, List<String?>>{};
+      return (
+        ranges: ranges,
+        respond: (request, body) {
+          final name = request.url.pathSegments.last;
+          if (!sizes.containsKey(name)) return null;
+          final range = request.headers['Range'];
+          (ranges[name] ??= []).add(range);
+          final m = range == null
+              ? null
+              : RegExp(r'bytes=(\d+)-(\d*)').firstMatch(range);
+          const etag = '"v1"';
+          if (m == null) {
+            return http.StreamedResponse(Stream.value(body), 200,
+                contentLength: body.length, headers: {'etag': etag});
+          }
+          final start = int.parse(m.group(1)!);
+          final end = m.group(2)!.isEmpty
+              ? body.length - 1
+              : int.parse(m.group(2)!);
+          final part = body.sublist(start, end + 1);
+          return http.StreamedResponse(Stream.value(part), 206,
+              contentLength: part.length,
+              headers: {
+                'etag': etag,
+                'content-range': 'bytes $start-$end/${body.length}',
+              });
+        },
+      );
+    }
+
+    LibraryMirrorExporter build(
+      http.StreamedResponse? Function(http.BaseRequest, Uint8List) respond,
+      FutureOr<int> Function(String, int, String?)? callback,
+    ) =>
+        buildExporter(
+          releases,
+          assetSizes: sizes,
+          respond: respond,
+          scheduler: DownloadScheduler(maxConcurrent: 1),
+          maxConnections: 4,
+          segmentThresholdBytes: 1 << 20,
+          connectionsForAsset: callback,
+        ).exporter;
+
+    test('נכס אחד מפוצל ל-2 וחבירו בחיבור יחיד באותו ייצוא', () async {
+      final server = rangeServer();
+      final seen = <(String, int, String?)>[];
+      await build(server.respond, (dest, s, sha) {
+        seen.add((p.basename(dest), s, sha));
+        return p.basename(dest) == 'seforim.db.zst' ? 2 : 1;
+      }).export(destDir: destDir);
+
+      expect(seen.map((e) => e.$1), containsAll(
+          ['seforim.db.zst', 'patch-v2-v3.db.zst']));
+      expect(
+          seen.where((e) => e.$2 == size).map((e) => e.$1), hasLength(2));
+      expect(seen.every((e) => e.$3 != null), isTrue);
+      expect(server.ranges['seforim.db.zst'], hasLength(2));
+      expect(server.ranges['seforim.db.zst']!.every((r) => r != null), isTrue);
+      expect(server.ranges['patch-v2-v3.db.zst'], [null]);
+      expect(File('$destDir/assets/v3/seforim.db.zst').lengthSync(), size);
+      expect(File('$destDir/assets/v3/patch-v2-v3.db.zst').lengthSync(), size);
+    });
+
+    test('ערך קטן מ-1 נחשב לחיבור יחיד', () async {
+      final server = rangeServer();
+      await build(server.respond, (_, _, _) => 0).export(destDir: destDir);
+      expect(server.ranges['seforim.db.zst'], [null]);
+    });
+
+    test('בלי callback — ברירת המחדל של הייצוא (4 טווחים)', () async {
+      final server = rangeServer();
+      await build(server.respond, null).export(destDir: destDir);
+      expect(server.ranges['seforim.db.zst'], hasLength(4));
+      expect(server.ranges['patch-v2-v3.db.zst'], hasLength(4));
+    });
+
+    test('callback שזורק — כשל נקי בלי נכס חצי-כתוב', () async {
+      final server = rangeServer();
+      await expectLater(
+        build(server.respond, (dest, _, _) {
+          if (p.basename(dest) == 'seforim.db.zst') throw StateError('boom');
+          return 1;
+        }).export(destDir: destDir),
+        throwsA(isA<StateError>()),
+      );
+      expect(server.ranges['seforim.db.zst'], isNull);
+      expect(File('$destDir/assets/v3/seforim.db.zst').existsSync(), isFalse);
+      expect(
+          File('$destDir/assets/v3/seforim.db.zst.segments').existsSync(),
+          isFalse);
+    });
+
+    test('callback שמבוטל (isCancelled) — ייצוא מבוטל בלי הורדה', () async {
+      final server = rangeServer();
+      var cancelled = false;
+      await expectLater(
+        build(server.respond, (_, _, _) {
+          cancelled = true;
+          return 2;
+        }).export(destDir: destDir, isCancelled: () => cancelled),
+        throwsA(anything),
+      );
+      expect(server.ranges['seforim.db.zst'], isNull);
+      expect(File('$destDir/assets/v3/seforim.db.zst').existsSync(), isFalse);
     });
   });
 }
